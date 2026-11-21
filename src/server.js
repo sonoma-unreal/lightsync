@@ -590,13 +590,13 @@ wss.on('connection', (ws) => {
     if (Object.keys(message).some((key) => !['type', 'testId', 'command', 'commandId', 'effect', 'rate', 'value', 'enabled', 'acknowledgedRisk', 'screenColor', 'accentColor', 'text', 'plan', 'groups', 'groupIndex'].includes(key))) return ws.close(1008, 'Unexpected message field');
     if (ws.role === 'audience' && message.type === 'confirm-sync') {
       if (Object.keys(message).some((key) => !['type', 'testId', 'groupIndex'].includes(key)) || !Number.isSafeInteger(message.testId) || (message.groupIndex !== undefined && message.groupIndex !== null && (!Number.isSafeInteger(message.groupIndex) || message.groupIndex < 0 || message.groupIndex >= ws.room.groups.length)) || (ws.room.groups.length === 0 && message.groupIndex !== undefined && message.groupIndex !== null)) return ws.close(1008, 'Invalid sync confirmation');
-      if (ws.confirmed) return send(ws, { type: 'joined', reconnectToken: ws.reconnectToken, audienceIndex: ws.audienceIndex, audienceSeed: ws.audienceSeed, groupIndex: ws.groupIndex ?? null, state: roomState(ws.room) });
+      if (ws.confirmed) return send(ws, { type: 'joined', reconnectToken: ws.reconnectToken, groupIndex: ws.groupIndex ?? null, state: roomState(ws.room) });
       if (!ws.room.syncTest.active || message.testId !== ws.room.syncTest.testId) return send(ws, { type: 'error', message: 'Wait for the controller to start the sync test before confirming' });
       if (ws.room.groups.length && message.groupIndex === undefined) return send(ws, { type: 'error', message: 'Choose an audience section before confirming sync' });
       ws.room.waiting.delete(ws); ws.room.audience.add(ws); ws.confirmed = true; ws.audienceIndex = ws.room.audienceIndex++; ws.groupIndex = message.groupIndex ?? null;
       ws.reconnectToken = issueToken({ role: 'audience', room: ws.room.id, instance: ws.room.instance, session: crypto.randomUUID(), ...(ws.groupIndex === null ? {} : { groupIndex: ws.groupIndex }) }, Math.max(1, ws.room.expiresAt - Date.now()));
       if (ws.room.waiting.size === 0) ws.room.syncTest = { ...ws.room.syncTest, active: false, completed: true };
-      send(ws, { type: 'joined', reconnectToken: ws.reconnectToken, audienceIndex: ws.audienceIndex, audienceSeed: ws.audienceSeed, groupIndex: ws.groupIndex ?? null, state: roomState(ws.room) }); publishPresence(ws.room); return;
+      send(ws, { type: 'joined', reconnectToken: ws.reconnectToken, groupIndex: ws.groupIndex ?? null, state: roomState(ws.room) }); publishPresence(ws.room); return;
     }
     if (ws.role === 'operator' && message.type === 'command') {
       if (!validateCommand(message)) return send(ws, { type: 'error', message: 'Invalid command structure', command: typeof message.command === 'string' ? message.command.slice(0, 32) : 'unknown', commandId: Number.isSafeInteger(message.commandId) ? message.commandId : null });
