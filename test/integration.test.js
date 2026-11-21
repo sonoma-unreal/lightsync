@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import net from 'node:net';
 import { once } from 'node:events';
+import { createServer } from 'node:http';
 import { WebSocket } from 'ws';
 
 const TEST_SESSION_SECRET = 'integration-test-session-secret-0123456789';
@@ -22,7 +23,7 @@ async function waitForServer(base, child) {
   }
   throw new Error('server did not become ready');
 }
-function accountCookie(secret = TEST_SESSION_SECRET, sub = 'test-google-subject') {
+function accountCookie(secret = TEST_SESSION_SECRET, sub = 'test-subject') {
   const body = Buffer.from(JSON.stringify({ role:'account', sub, email:`${sub}@example.test`, name:'Test Host', exp:Date.now()+60_000 })).toString('base64url');
   const signature = crypto.createHmac('sha256', secret).update(body).digest('base64url');
   return `lightsync_account=${body}.${signature}`;
@@ -32,63 +33,262 @@ async function create(base, name, secret = TEST_SESSION_SECRET, origin = base) {
   const data = await res.json(); assert.equal(res.status, 200); return data;
 }
 
-test('Google account is required to create a room and sign-in is configurable', async (t) => {
+// Helper to create a room with Neon Auth authentication
+async function createWithNeonAuth(base, name, email = 'test@example.test', password = 'testpass123') {
+  const cookie = await signInNeonAuth(base, email, password);
+  const res = await fetch(`${base}/api/rooms`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Origin: base, Cookie: cookie },
+    body: JSON.stringify({ name })
+  });
+  const data = await res.json();
+  assert.equal(res.status, 200);
+  return { ...data, cookie };
+}
+
+// Mock Neon Auth server for tests
+let mockNeonAuthServer = null;
+let mockNeonAuthBaseUrl = '';
+
+async function startMockNeonAuthServer() {
+  if (mockNeonAuthServer) return mockNeonAuthBaseUrl;
+  
+  const port = await freePort();
+  mockNeonAuthBaseUrl = `http://127.0.0.1:${port}`;
+  
+  const sessions = new Map();
+  const users = new Map();
+  
+  mockNeonAuthServer = createServer(async (req, res) => {
+    const url = new URL(req.url, mockNeonAuthBaseUrl);
+    const cookie = req.headers.cookie || '';
+    const origin = req.headers.origin || mockNeonAuthBaseUrl;
+    
+    // Parse session cookie
+    let sessionId = null;
+    for (const part of cookie.split(';')) {
+      const [name, value] = part.trim().split('=');
+      if (name === '__Secure-neon-auth.session_token') {
+        sessionId = value;
+        break;
+      }
+    }
+    
+    let session = sessionId ? sessions.get(sessionId) : null;
+    
+    // Set CORS headers
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Cookie');
+    
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    
+    try {
+      if (url.pathname === '/get-session') {
+        if (session?.user) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ user: session.user }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ user: null }));
+        }
+      } else if (url.pathname === '/sign-up/email' && req.method === 'POST') {
+        let body = '';
+        for await (const chunk of req) body += chunk;
+        const { email, password, name } = JSON.parse(body);
+        if (users.has(email)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ message: 'User already exists' }));
+          return;
+        }
+        const userId = `user_${Date.now()}`;
+        const user = { id: userId, email, name };
+        users.set(email, { user, password });
+        const newSessionId = `session_${Date.now()}`;
+        sessions.set(newSessionId, { user });
+        res.setHeader('Set-Cookie', `__Secure-neon-auth.session_token=${newSessionId}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=315360000`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ user, session: { user } }));
+      } else if (url.pathname === '/sign-in/email' && req.method === 'POST') {
+        let body = '';
+        for await (const chunk of req) body += chunk;
+        const { email, password } = JSON.parse(body);
+        const userData = users.get(email);
+        if (!userData || userData.password !== password) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ message: 'Invalid credentials' }));
+          return;
+        }
+        const newSessionId = `session_${Date.now()}`;
+        sessions.set(newSessionId, { user: userData.user });
+        res.setHeader('Set-Cookie', `__Secure-neon-auth.session_token=${newSessionId}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=315360000`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ user: userData.user, session: { user: userData.user } }));
+      } else if (url.pathname === '/sign-out' && req.method === 'POST') {
+        if (sessionId) sessions.delete(sessionId);
+        res.setHeader('Set-Cookie', '__Secure-neon-auth.session_token=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } else if (url.pathname === '/email-otp/send-verification-otp' && req.method === 'POST') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } else if (url.pathname === '/email-otp/verify-email' && req.method === 'POST') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } else {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Not found' }));
+      }
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Internal error' }));
+    }
+  });
+  
+  await new Promise((resolve) => mockNeonAuthServer.listen(port, '127.0.0.1', resolve));
+  return mockNeonAuthBaseUrl;
+}
+
+async function stopMockNeonAuthServer() {
+  if (mockNeonAuthServer) {
+    await new Promise((resolve) => mockNeonAuthServer.close(resolve));
+    mockNeonAuthServer = null;
+    mockNeonAuthBaseUrl = '';
+  }
+}
+
+// Helper to sign in a user via Neon Auth and return the session cookie
+async function signInNeonAuth(base, email = 'test@example.test', password = 'testpass123', name = 'Test User') {
+  // First try to sign in
+  let signin = await fetch(`${base}/api/auth/signin`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Origin: base },
+    body: JSON.stringify({ email, password })
+  });
+  
+  // If user doesn't exist, sign up first
+  if (signin.status === 400) {
+    const signup = await fetch(`${base}/api/auth/signup`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Origin: base },
+      body: JSON.stringify({ email, password, name })
+    });
+    assert.equal(signup.status, 200);
+    signin = await fetch(`${base}/api/auth/signin`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Origin: base },
+      body: JSON.stringify({ email, password })
+    });
+  }
+  
+  assert.equal(signin.status, 200);
+  return signin.headers.get('set-cookie').split(';', 1)[0];
+}
+
+// Helper to create a room with Neon Auth authentication
+async function createWithAuth(base, name, email = 'test@example.test', password = 'testpass123') {
+  const cookie = await signInNeonAuth(base, email, password);
+  const res = await fetch(`${base}/api/rooms`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Origin: base, Cookie: cookie },
+    body: JSON.stringify({ name })
+  });
+  const data = await res.json();
+  assert.equal(res.status, 200);
+  return { ...data, cookie };
+}
+
+test('Neon Auth is required to create a room and sign-in is configurable', async (t) => {
   const port=await freePort(),base=`http://127.0.0.1:${port}`;
-  const child=spawn(process.execPath,['src/server.js'],{env:{...process.env,HOST:'127.0.0.1',PORT:String(port),PUBLIC_BASE_URL:base,NODE_ENV:'test',GOOGLE_CLIENT_ID:'',GOOGLE_CLIENT_SECRET:'',GOOGLE_CALLBACK_URL:''},stdio:'ignore'});
+  const neonAuthUrl = await startMockNeonAuthServer();
+  const child=spawn(process.execPath,['src/server.js'],{env:{...process.env,HOST:'127.0.0.1',PORT:String(port),PUBLIC_BASE_URL:base,NODE_ENV:'test',NEON_AUTH_BASE_URL:neonAuthUrl,NEON_AUTH_JWKS_URL:`${neonAuthUrl}/.well-known/jwks.json`},stdio:'ignore'});
   t.after(()=>child.kill());await waitForServer(base,child);
-  const me=await fetch(`${base}/api/auth/me`);assert.deepEqual(await me.json(),{enabled:false,user:null});
-  assert.equal((await fetch(`${base}/auth/google`,{redirect:'manual'})).status,503);
+  const me=await fetch(`${base}/api/auth/session`);assert.deepEqual(await me.json(),{enabled:true,user:null});
   const anonymous=await fetch(`${base}/api/rooms`,{method:'POST',headers:{'content-type':'application/json',Origin:base},body:JSON.stringify({name:'No account'})});assert.equal(anonymous.status,401);
-  const wrongOrigin=await fetch(`${base}/api/rooms`,{method:'POST',headers:{'content-type':'application/json',Origin:'https://attacker.example',Cookie:accountCookie()},body:JSON.stringify({name:'Cross origin'})});assert.equal(wrongOrigin.status,403);
-  const authenticated=await fetch(`${base}/api/auth/me`,{headers:{Cookie:accountCookie()}});assert.deepEqual(await authenticated.json(),{enabled:false,user:null});
+  // Test cross-origin rejection with Neon Auth cookie
+  const cookie = await signInNeonAuth(base);
+  const wrongOrigin=await fetch(`${base}/api/rooms`,{method:'POST',headers:{'content-type':'application/json',Origin:'https://attacker.example',Cookie:cookie},body:JSON.stringify({name:'Cross origin'})});assert.equal(wrongOrigin.status,403);
+  const authenticated=await fetch(`${base}/api/auth/session`,{headers:{Cookie:cookie}});assert.deepEqual(await authenticated.json(),{enabled:true,user:{email:'test@example.test'}});
 });
 
 test('saved shows are isolated by account and reopen with the saved safe configuration', async (t) => {
-  const port=await freePort(),base=`http://127.0.0.1:${port}`,cookie=accountCookie();
-  const child=spawn(process.execPath,['src/server.js'],{env:{...process.env,HOST:'127.0.0.1',PORT:String(port),PUBLIC_BASE_URL:base,DATABASE_URL:'',NODE_ENV:'test'},stdio:'ignore'});
-  t.after(()=>child.kill());await waitForServer(base,child);
-  const created=await create(base,'Friday lights');assert.equal(created.room.torchEnabled,true,'guest effects are enabled by default for a new show');assert.equal(created.room.effect,'solid');assert.equal(created.room.rate,0);
-  const headers={Cookie:cookie,Origin:base,'Content-Type':'application/json'};
-  const mutationHeaders={Cookie:cookie,Origin:base};
-  const libraryResponse=await fetch(`${base}/api/account/shows`,{headers});assert.equal(libraryResponse.status,200);
-  const library=await libraryResponse.json();assert.equal(library.persistence,'temporary');assert.equal(library.shows.length,1);
-  const saved=library.shows[0];assert.equal(saved.name,'Friday lights');assert.equal(saved.activeRoom.code,created.room.id);
-  const otherHeaders={Cookie:accountCookie(TEST_SESSION_SECRET,'another-account'),Origin:base};
-  const wrongContinue=await fetch(`${base}/api/account/shows/${saved.id}/continue`,{method:'POST',headers:otherHeaders});assert.equal(wrongContinue.status,404,await wrongContinue.text());
-  const wrongDelete=await fetch(`${base}/api/account/shows/${saved.id}`,{method:'DELETE',headers:otherHeaders});assert.equal(wrongDelete.status,404,await wrongDelete.text());
-  const changed=await fetch(`${base}/api/operator/command`,{method:'POST',headers:{Authorization:`Bearer ${created.token}`,'Content-Type':'application/json'},body:JSON.stringify({command:'screen-colors',commandId:1,screenColor:'#6f54e8',accentColor:'#28d7bf'})});
-  assert.equal(changed.status,200);
-  const ended=await fetch(`${base}/api/operator/close`,{method:'POST',headers:{Authorization:`Bearer ${created.token}`}});assert.equal(ended.status,200);
-  const reopenedResponse=await fetch(`${base}/api/account/shows/${saved.id}/continue`,{method:'POST',headers:mutationHeaders});assert.equal(reopenedResponse.status,200);
-  const reopened=await reopenedResponse.json();assert.notEqual(reopened.room.id,created.room.id);assert.equal(reopened.room.screenColor,'#6f54e8');assert.equal(reopened.room.accentColor,'#28d7bf');assert.equal(reopened.room.torchEnabled,true);assert.equal(reopened.room.screenMode,false);assert.equal(reopened.room.effect,'solid');assert.equal(reopened.room.rate,0);
-  const removed=await fetch(`${base}/api/account/shows/${saved.id}`,{method:'DELETE',headers:mutationHeaders});assert.equal(removed.status,200);
-  assert.equal((await (await fetch(`${base}/api/account/shows`,{headers})).json()).shows.length,0);
-  assert.equal((await fetch(`${base}/api/rooms/${reopened.room.id}`)).status,200,'deleting a saved setup does not close its active room');
-});
-
-test('long-lived account cookies renew and sign-out revokes the server session', async (t) => {
   const port=await freePort(),base=`http://127.0.0.1:${port}`;
-  const child=spawn(process.execPath,['src/server.js'],{env:{...process.env,HOST:'127.0.0.1',PORT:String(port),PUBLIC_BASE_URL:base,DATABASE_URL:'',GOOGLE_CLIENT_ID:'lightsync-test.apps.googleusercontent.com',GOOGLE_CLIENT_SECRET:'test-client-secret',GOOGLE_CALLBACK_URL:'',NODE_ENV:'development'},stdio:'ignore'});
+  const neonAuthUrl = await startMockNeonAuthServer();
+  const child=spawn(process.execPath,['src/server.js'],{env:{...process.env,HOST:'127.0.0.1',PORT:String(port),PUBLIC_BASE_URL:base,DATABASE_URL:'',NODE_ENV:'test',NEON_AUTH_BASE_URL:neonAuthUrl,NEON_AUTH_JWKS_URL:`${neonAuthUrl}/.well-known/jwks.json`},stdio:'ignore'});
   t.after(()=>child.kill());await waitForServer(base,child);
-  const legacy=await fetch(`${base}/api/auth/me`,{headers:{Cookie:accountCookie()}});assert.equal(legacy.status,200);
-  const signedIn=await legacy.json();assert.equal(signedIn.user.firstName,'Test');
-  const sessionCookie=legacy.headers.get('set-cookie');assert.match(sessionCookie,/Max-Age=315360000/);assert.match(sessionCookie,/HttpOnly/);
-  const cookiePair=sessionCookie.split(';',1)[0];
-  const stillSignedIn=await fetch(`${base}/api/auth/me`,{headers:{Cookie:cookiePair}});assert.equal((await stillSignedIn.json()).user.email,'test-google-subject@example.test');
-  const logout=await fetch(`${base}/auth/logout`,{method:'POST',headers:{Origin:base,Cookie:cookiePair}});assert.equal(logout.status,204);
-  const signedOut=await fetch(`${base}/api/auth/me`,{headers:{Cookie:cookiePair}});assert.equal((await signedOut.json()).user,null);
+  // Sign in via Neon Auth
+  const created = await createWithNeonAuth(base, 'Friday lights');
+  assert.equal(created.room.torchEnabled, true, 'guest effects are enabled by default for a new show');
+  assert.equal(created.room.effect, 'solid');
+  assert.equal(created.room.rate, 0);
+  const headers = { Cookie: created.cookie, Origin: base, 'Content-Type': 'application/json' };
+  const mutationHeaders = { Cookie: created.cookie, Origin: base };
+  const libraryResponse = await fetch(`${base}/api/account/shows`, { headers });
+  assert.equal(libraryResponse.status, 200);
+  const library = await libraryResponse.json();
+  assert.equal(library.persistence, 'temporary');
+  assert.equal(library.shows.length, 1);
+  const saved = library.shows[0];
+  assert.equal(saved.name, 'Friday lights');
+  assert.equal(saved.activeRoom.code, created.room.id);
+  // Sign in as another user
+  const signin2 = await fetch(`${base}/api/auth/signin`, { method: 'POST', headers: { 'content-type': 'application/json', Origin: base }, body: JSON.stringify({ email: 'another@example.test', password: 'testpass123' }) });
+  assert.equal(signin2.status, 200);
+  const otherCookie = signin2.headers.get('set-cookie').split(';', 1)[0];
+  const otherHeaders = { Cookie: otherCookie, Origin: base };
+  const wrongContinue = await fetch(`${base}/api/account/shows/${saved.id}/continue`, { method: 'POST', headers: otherHeaders });
+  assert.equal(wrongContinue.status, 404, await wrongContinue.text());
+  const wrongDelete = await fetch(`${base}/api/account/shows/${saved.id}`, { method: 'DELETE', headers: otherHeaders });
+  assert.equal(wrongDelete.status, 404, await wrongDelete.text());
+  const changed = await fetch(`${base}/api/operator/command`, { method: 'POST', headers: { Authorization: `Bearer ${created.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ command: 'screen-colors', commandId: 1, screenColor: '#6f54e8', accentColor: '#28d7bf' }) });
+  assert.equal(changed.status, 200);
+  const ended = await fetch(`${base}/api/operator/close`, { method: 'POST', headers: { Authorization: `Bearer ${created.token}` } });
+  assert.equal(ended.status, 200);
+  const reopenedResponse = await fetch(`${base}/api/account/shows/${saved.id}/continue`, { method: 'POST', headers: mutationHeaders });
+  assert.equal(reopenedResponse.status, 200);
+  const reopened = await reopenedResponse.json();
+  assert.notEqual(reopened.room.id, created.room.id);
+  assert.equal(reopened.room.screenColor, '#6f54e8');
+  assert.equal(reopened.room.accentColor, '#28d7bf');
+  assert.equal(reopened.room.torchEnabled, true);
+  assert.equal(reopened.room.screenMode, false);
+  assert.equal(reopened.room.effect, 'solid');
+  assert.equal(reopened.room.rate, 0);
+  const removed = await fetch(`${base}/api/account/shows/${saved.id}`, { method: 'DELETE', headers: mutationHeaders });
+  assert.equal(removed.status, 200);
+  assert.equal((await (await fetch(`${base}/api/account/shows`, { headers })).json()).shows.length, 0);
+  assert.equal((await fetch(`${base}/api/rooms/${reopened.room.id}`)).status, 200, 'deleting a saved setup does not close its active room');
 });
 
-test('Google OAuth start uses state, nonce, and PKCE with the configured Lightsync callback', async (t) => {
-  const port=await freePort(),base=`http://127.0.0.1:${port}`,callback=`${base}/auth/google/callback`;
-  const child=spawn(process.execPath,['src/server.js'],{env:{...process.env,HOST:'127.0.0.1',PORT:String(port),PUBLIC_BASE_URL:base,GOOGLE_CLIENT_ID:'lightsync-test.apps.googleusercontent.com',GOOGLE_CLIENT_SECRET:'test-client-secret',GOOGLE_CALLBACK_URL:callback,NODE_ENV:'test'},stdio:'ignore'});
+test('Neon Auth session cookies renew and sign-out revokes the server session', async (t) => {
+  const port=await freePort(),base=`http://127.0.0.1:${port}`;
+  const neonAuthUrl = await startMockNeonAuthServer();
+  const child=spawn(process.execPath,['src/server.js'],{env:{...process.env,HOST:'127.0.0.1',PORT:String(port),PUBLIC_BASE_URL:base,DATABASE_URL:'',NODE_ENV:'development',NEON_AUTH_BASE_URL:neonAuthUrl,NEON_AUTH_JWKS_URL:`${neonAuthUrl}/.well-known/jwks.json`},stdio:'ignore'});
   t.after(()=>child.kill());await waitForServer(base,child);
-  const start=await fetch(`${base}/auth/google`,{redirect:'manual'});assert.equal(start.status,302);
-  const authorization=new URL(start.headers.get('location'));assert.equal(authorization.origin,'https://accounts.google.com');assert.equal(authorization.searchParams.get('client_id'),'lightsync-test.apps.googleusercontent.com');
-  assert.equal(authorization.searchParams.get('redirect_uri'),callback);assert.equal(authorization.searchParams.get('response_type'),'code');assert.equal(authorization.searchParams.get('code_challenge_method'),'S256');assert.ok(authorization.searchParams.get('code_challenge'));assert.ok(authorization.searchParams.get('nonce'));assert.ok(authorization.searchParams.get('state'));
-  assert.deepEqual(new Set(authorization.searchParams.get('scope').split(' ')),new Set(['openid','email','profile']));
-  assert.match(start.headers.get('set-cookie'),/HttpOnly/);assert.match(start.headers.get('set-cookie'),/SameSite=Lax/);
-  const invalid=await fetch(`${base}/auth/google/callback?error=access_denied`,{redirect:'manual'});assert.equal(invalid.status,302);assert.equal(invalid.headers.get('location'),'/host?auth=error');
+  // First sign in via Neon Auth
+  const signin=await fetch(`${base}/api/auth/signin`,{method:'POST',headers:{'content-type':'application/json',Origin:base},body:JSON.stringify({email:'test@example.test',password:'testpass123'})});
+  assert.equal(signin.status,200);
+  const sessionCookie=signin.headers.get('set-cookie');
+  assert.match(sessionCookie,/Max-Age=315360000/);assert.match(sessionCookie,/HttpOnly/);
+  const cookiePair=sessionCookie.split(';',1)[0];
+  const stillSignedIn=await fetch(`${base}/api/auth/session`,{headers:{Cookie:cookiePair}});assert.equal((await stillSignedIn.json()).user.email,'test@example.test');
+  const logout=await fetch(`${base}/api/auth/signout`,{method:'POST',headers:{Origin:base,Cookie:cookiePair}});assert.equal(logout.status,204);
+  const signedOut=await fetch(`${base}/api/auth/session`,{headers:{Cookie:cookiePair}});assert.equal((await signedOut.json()).user,null);
+});
+
+test('Neon Auth signup and signin endpoints are available', async (t) => {
+  const port=await freePort(),base=`http://127.0.0.1:${port}`;
+  const neonAuthUrl = await startMockNeonAuthServer();
+  const child=spawn(process.execPath,['src/server.js'],{env:{...process.env,HOST:'127.0.0.1',PORT:String(port),PUBLIC_BASE_URL:base,NODE_ENV:'test',NEON_AUTH_BASE_URL:neonAuthUrl,NEON_AUTH_JWKS_URL:`${neonAuthUrl}/.well-known/jwks.json`},stdio:'ignore'});
+  t.after(()=>child.kill());await waitForServer(base,child);
+  const signup=await fetch(`${base}/api/auth/signup`,{method:'POST',headers:{'content-type':'application/json',Origin:base},body:JSON.stringify({email:'test@example.test',password:'testpass123',name:'Test User'})});assert.equal(signup.status,200);
+  const signin=await fetch(`${base}/api/auth/signin`,{method:'POST',headers:{'content-type':'application/json',Origin:base},body:JSON.stringify({email:'test@example.test',password:'testpass123'})});assert.equal(signin.status,200);
+  const session=await fetch(`${base}/api/auth/session`,{headers:{Cookie:signin.headers.get('set-cookie')}});assert.deepEqual(await session.json(),{enabled:true,user:{email:'test@example.test'}});
 });
 function connect(base, role, room, token, extra = {}) {
   const ws = new WebSocket(base.replace('http','ws') + '/ws', { headers: { Origin: base } });

@@ -23,7 +23,7 @@
             <p>LightSync creates a random sign-in session managed by Neon Auth. The browser stores it in an HttpOnly, SameSite=Lax cookie, marked Secure when served over HTTPS. Its browser lifetime is up to ten years unless you sign out or clear browser data. When PostgreSQL storage is configured, the server stores a hash of the session token, not the raw token. Signing out revokes the current session; it does not delete your account profile or saved shows.</p>
 
       <h3>Saved shows and show settings</h3>
-      <p>When a signed-in host creates a show, LightSync saves that host’s show setup to the account library. This can include the show name, selected effects, timing and rate settings, colors, protection setting, audience section labels, controller message, and timed light cues. It is associated with the Google account identifier so only that account can list, reopen, or delete the saved setup. In the hosted deployment, this account and saved-show data is stored in PostgreSQL provided by Neon.</p>
+      <p>When a signed-in host creates a show, LightSync saves that host's show setup to the account library. This can include the show name, selected effects, timing and rate settings, colors, protection setting, audience section labels, controller message, and timed light cues. It is associated with the Neon Auth account identifier so only that account can list, reopen, or delete the saved setup. In the hosted deployment, this account and saved-show data is stored in PostgreSQL provided by Neon.</p>
       <p>Saved setups do not include the controller’s audio file. Audio selected for beat analysis is read and analyzed in the controller’s browser; LightSync does not upload the audio file. The browser may keep locally saved cue sheets, playlist information, workspace layouts, appearance preferences, and other controller preferences in local browser storage. That information remains on that browser unless browser data is cleared, and is not automatically synchronized to LightSync’s account database.</p>
 
       <h3>Temporary show and audience information</h3>
@@ -68,7 +68,7 @@
         <li><strong>Active rooms:</strong> Removed at room end, after up to 12 hours, or on server restart.</li>
         <li><strong>Rate-limit counters:</strong> Kept in process memory to enforce short rolling limits; they are not written to the account database or application request logs and are cleared when the process restarts.</li>
         <li><strong>Browser data:</strong> Remains in local or session storage until it expires with the browser session or is cleared by you.</li>
-        <li><strong>Provider records:</strong> Render, Neon, and Google may retain operational, backup, or account records under their own retention schedules.</li>
+        <li><strong>Provider records:</strong> Render, Neon, and Neon Auth may retain operational, backup, or account records under their own retention schedules.</li>
       </ul>
       <p>When you request account deletion, LightSync will verify the request and remove account and saved-show records from its active database, subject to legal obligations and provider-controlled backup or operational retention. Signing out alone does not delete saved show data.</p>
 

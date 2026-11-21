@@ -5,10 +5,10 @@ import { createAccountStore } from '../src/account-store.js';
 test('account sessions use opaque tokens and can be revoked', async () => {
   const store = createAccountStore({ databaseUrl: '' });
   await store.initialize();
-  const token = await store.createSession({ sub: 'google-subject', email: 'host@example.test', name: 'Ada Lovelace', firstName: 'Ada' });
+  const token = await store.createSession({ sub: 'test-subject', email: 'host@example.test', name: 'Ada Lovelace', firstName: 'Ada' });
   assert.ok(token.length >= 40);
-  assert.equal(token.includes('google-subject'), false);
-  assert.deepEqual(await store.readSession(token), { sub: 'google-subject', email: 'host@example.test', name: 'Ada Lovelace', firstName: 'Ada' });
+    assert.equal(token.includes('test-subject'), false);
+    assert.deepEqual(await store.readSession(token), { sub: 'test-subject', email: 'host@example.test', name: 'Ada Lovelace', firstName: 'Ada' });
   await store.revokeSession(token);
   assert.equal(await store.readSession(token), null);
   await store.close();

@@ -322,13 +322,6 @@ app.get('/api/auth/me', async (req, reply) => {
     return { enabled: true, user: null };
   }
 });
-app.post('/auth/logout', async (req, reply) => {
-  if (!hasSameOrigin(req)) return reply.code(403).send({ error: 'Same-origin request required' });
-  await accountStore.revokeSession(requestCookie(req, 'lightsync_account'));
-  reply.header('Set-Cookie', sessionCookie('lightsync_account', '', 0, req));
-  return reply.code(204).send();
-});
-
 // Neon Auth email/password endpoints
 app.post('/api/auth/signup', async (req, reply) => {
   if (!hasSameOrigin(req)) return reply.code(403).send({ error: 'Same-origin request required' });
