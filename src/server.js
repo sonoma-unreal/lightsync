@@ -29,6 +29,7 @@ if (configuredGoogleCallback && (configuredGoogleCallback.pathname !== '/auth/go
 const app = Fastify({
   logger: { level: process.env.LOG_LEVEL || 'info', serializers: { req: (request) => ({ method: request.method, url: (() => { try { return new URL(request.url, 'http://localhost').pathname; } catch { return '/'; } })() }) } },
   bodyLimit: 16 * 1024,
+  trustProxy: true,
 });
 const accountStore = createAccountStore();
 await accountStore.initialize();
