@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#090909">
+  <meta name="color-scheme" content="dark light">
+  <title>LightSync — Sign In</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Geist+Mono:wght@100..900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/styles.css?v=lightsync-auth-1">
+  <script>
+    window.NEON_AUTH_URL = 'https://ep-bold-poetry-bbwzeh3t.neonauth.c-15.us-east-1.aws.neon.tech/neondb/auth';
+  </script>
+</head>
+<body class="auth-page" data-theme="dark">
+  <div class="auth-shell">
+    <main class="auth-main">
+      <header class="auth-header">
+        <a href="/" class="auth-logo" aria-label="LightSync Home">
+          <svg class="auth-logo-mark" viewBox="0 0 32 32" fill="none" aria-hidden="true"><circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="2"/><path d="M16 6v20M6 16h20" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <span class="auth-logo-text">LightSync</span>
+        </a>
+      </header>
+
+      <div class="auth-container">
+        <!-- Step 1: Email/Password Form (Signup or Signin) -->
+        <section id="auth-step-credentials" class="auth-step" aria-labelledby="credentials-title">
+          <div class="auth-tabs" role="tablist" aria-label="Choose action">
+            <button id="tab-signin" class="auth-tab" role="tab" aria-selected="true" aria-controls="panel-signin" tabindex="0">Sign In</button>
+            <button id="tab-signup" class="auth-tab" role="tab" aria-selected="false" aria-controls="panel-signup" tabindex="-1">Sign Up</button>
+          </div>
+
+          <div id="panel-signin" class="auth-panel" role="tabpanel" aria-labelledby="tab-signin" hidden="false">
+            <h2 id="credentials-title" class="auth-title">Welcome back</h2>
+            <p class="auth-subtitle">Sign in to host your light shows</p>
+            <form id="signin-form" class="auth-form" novalidate>
+              <div class="form-group">
+                <label for="signin-email">Email</label>
+                <input id="signin-email" type="email" name="email" autocomplete="email" required placeholder="you@example.com" aria-describedby="signin-email-error">
+                <span id="signin-email-error" class="form-error" aria-live="polite"></span>
+              </div>
+              <div class="form-group">
+                <label for="signin-password">Password</label>
+                <input id="signin-password" type="password" name="password" autocomplete="current-password" required placeholder="••••••••" aria-describedby="signin-password-error">
+                <span id="signin-password-error" class="form-error" aria-live="polite"></span>
+              </div>
+              <button id="signin-submit" type="submit" class="button button-primary button-block" disabled>
+                <span class="button-text">Sign In</span>
+                <span class="button-loading hidden" aria-hidden="true">⟳</span>
+              </button>
+              <p id="signin-error" class="auth-error" role="alert" aria-live="assertive"></p>
+            </form>
+          </div>
+
+          <div id="panel-signup" class="auth-panel" role="tabpanel" aria-labelledby="tab-signup" hidden="true">
+            <h2 id="credentials-title" class="auth-title">Create your account</h2>
+            <p class="auth-subtitle">Start hosting synchronized light shows</p>
+            <form id="signup-form" class="auth-form" novalidate>
+              <div class="form-group">
+                <label for="signup-name">Name</label>
+                <input id="signup-name" type="text" name="name" autocomplete="name" required placeholder="Your name" maxlength="120" aria-describedby="signup-name-error">
+                <span id="signup-name-error" class="form-error" aria-live="polite"></span>
+              </div>
+              <div class="form-group">
+                <label for="signup-email">Email</label>
+                <input id="signup-email" type="email" name="email" autocomplete="email" required placeholder="you@example.com" aria-describedby="signup-email-error">
+                <span id="signup-email-error" class="form-error" aria-live="polite"></span>
+              </div>
+              <div class="form-group">
+                <label for="signup-password">Password</label>
+                <input id="signup-password" type="password" name="password" autocomplete="new-password" required placeholder="••••••••" minlength="8" aria-describedby="signup-password-error">
+                <span id="signup-password-error" class="form-error" aria-live="polite"></span>
+              </div>
+              <button id="signup-submit" type="submit" class="button button-primary button-block" disabled>
+                <span class="button-text">Create Account</span>
+                <span class="button-loading hidden" aria-hidden="true">⟳</span>
+              </button>
+              <p id="signup-error" class="auth-error" role="alert" aria-live="assertive"></p>
+            </form>
+          </div>
+        </section>
+
+        <!-- Step 2: Verification Code Entry -->
+        <section id="auth-step-verify" class="auth-step hidden" aria-labelledby="verify-title">
+          <h2 id="verify-title" class="auth-title">Check your email</h2>
+          <p class="auth-subtitle">We sent a 6-digit code to <strong id="verify-email-display"></strong></p>
+          <form id="verify-form" class="auth-form" novalidate>
+            <div class="form-group">
+              <label for="verify-code">Verification Code</label>
+              <input id="verify-code" type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required maxlength="6" pattern="[0-9]{6}" placeholder="000000" aria-describedby="verify-code-error">
+              <span id="verify-code-error" class="form-error" aria-live="polite"></span>
+            </div>
+            <button id="verify-submit" type="submit" class="button button-primary button-block" disabled>
+              <span class="button-text">Verify & Sign In</span>
+              <span class="button-loading hidden" aria-hidden="true">⟳</span>
+            </button>
+            <p id="verify-error" class="auth-error" role="alert" aria-live="assertive"></p>
+          </form>
+          <p class="auth-resend">
+            Didn't receive it? <button id="resend-code" type="button" class="button button-link">Resend code</button>
+          </p>
+          <p class="auth-back">
+            <button id="back-to-credentials" type="button" class="button button-link">← Back</button>
+          </p>
+        </section>
+
+        <!-- Step 3: Success / Redirect -->
+        <section id="auth-step-success" class="auth-step hidden" aria-labelledby="success-title">
+          <div class="success-icon" aria-hidden="true">✓</div>
+          <h2 id="success-title" class="auth-title">You're signed in!</h2>
+          <p class="auth-subtitle">Redirecting to your dashboard…</p>
+        </section>
+      </div>
+
+      <!-- Google OAuth Option -->
+      <section class="auth-divider" aria-hidden="true">
+        <span>or continue with</span>
+      </section>
+      <a id="google-signin-link" href="/auth/google" class="button button-secondary button-block auth-google">
+        <img src="/assets/google-g-logo.png" alt="" aria-hidden="true" class="google-mark">
+        <span>Continue with Google</span>
+      </a>
+
+      <footer class="auth-footer">
+        <p>By continuing, you agree to our <a href="/terms">Terms of Service</a> and <a href="/privacy">Privacy Policy</a>.</p>
+      </footer>
+    </main>
+  </div>
+
+  <script type="module" src="/assets/auth.js?v=lightsync-auth-1"></script>
+</body>
+</html>

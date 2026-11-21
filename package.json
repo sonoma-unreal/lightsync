@@ -15,11 +15,14 @@
     "load": "node scripts/load.js"
   },
   "dependencies": {
+    "@neon/auth": "^0.8.2",
     "@neon/config": "^1.11.3",
     "@neon/env": "^1.6.15",
+    "@neon/neon-js": "^0.10.2",
     "dotenv": "^18.0.9",
     "fastify": "^5.6.2",
     "google-auth-library": "^11.3.3",
+    "jose": "^6.2.18",
     "pg": "^8.23.1",
     "qrcode": "^1.5.4",
     "ws": "^8.18.3"

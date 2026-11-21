@@ -1,4 +1,8 @@
-if (process.env.NODE_ENV !== 'test') await import('dotenv/config');
+if (process.env.NODE_ENV !== 'test') {
+  const { config } = await import('dotenv');
+  config({ path: '.env.local' });
+  config(); // also load .env if exists
+}
 import Fastify from 'fastify';
 import { WebSocketServer, WebSocket } from 'ws';
 import QRCode from 'qrcode';
@@ -11,6 +15,7 @@ import { OAuth2Client } from 'google-auth-library';
 import { assertProductionConfig, issueToken, verifyToken } from './auth.js';
 import { createAccountStore, SESSION_COOKIE_MAX_AGE } from './account-store.js';
 import { normalizeShowPlan, normalizeTorchSettings, TORCH_EFFECTS } from './safety.js';
+import { verifyNeonAuthToken } from './neon-auth.js';
 
 assertProductionConfig();
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -308,6 +313,7 @@ app.get('/privacy', async (_req, reply) => { reply.header('Cache-Control', 'no-s
 app.get('/terms', async (_req, reply) => { reply.header('Cache-Control', 'no-store'); return reply.type('text/html; charset=utf-8').send(await fs.readFile(path.join(publicDir, 'terms.html'))); });
 app.get('/', async (_req, reply) => { reply.header('Cache-Control', 'no-store'); return reply.type('text/html; charset=utf-8').send(await fs.readFile(path.join(publicDir, 'home.html'))); });
 app.get('/host', async (_req, reply) => { reply.header('Cache-Control', 'no-store'); return reply.type('text/html; charset=utf-8').send(await fs.readFile(path.join(publicDir, 'operator.html'))); });
+app.get('/login', async (_req, reply) => { reply.header('Cache-Control', 'no-store'); return reply.type('text/html; charset=utf-8').send(await fs.readFile(path.join(publicDir, 'login.html'))); });
 app.get('/api/auth/me', async (req, reply) => {
   const user = googleAuthEnabled ? await accountFromRequest(req, reply) : null;
   if (user && !req.lightsyncAccountToken) reply.header('Set-Cookie', sessionCookie('lightsync_account', requestCookie(req, 'lightsync_account'), SESSION_COOKIE_MAX_AGE, req));
@@ -368,6 +374,180 @@ app.post('/auth/logout', async (req, reply) => {
   reply.header('Set-Cookie', sessionCookie('lightsync_account', '', 0, req));
   return reply.code(204).send();
 });
+
+// Neon Auth email/password endpoints
+app.post('/api/auth/signup', async (req, reply) => {
+  if (!hasSameOrigin(req)) return reply.code(403).send({ error: 'Same-origin request required' });
+  const { email, password, name } = req.body || {};
+  if (!email || !password || !name) return reply.code(400).send({ error: 'Email, password, and name are required' });
+  if (typeof email !== 'string' || typeof password !== 'string' || typeof name !== 'string') return reply.code(400).send({ error: 'Invalid input' });
+  if (email.length > 254 || password.length > 128 || name.length > 120) return reply.code(400).send({ error: 'Input too long' });
+
+  const authUrl = process.env.NEON_AUTH_BASE_URL;
+  if (!authUrl) return reply.code(503).send({ error: 'Neon Auth not configured' });
+
+  try {
+      const origin = req.headers.origin || `${req.protocol}://${req.headers.host}`;
+    const response = await fetch(`${authUrl}/sign-up/email`, {
+      method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Origin': origin },
+      body: JSON.stringify({ email, password, name }),
+    });
+    const data = await response.json();
+    if (!response.ok) return reply.code(response.status).send({ error: data.message || 'Sign up failed' });
+    return { user: data.user, session: data.session };
+  } catch (err) {
+    req.log.error({ err }, 'Neon Auth signup failed');
+    return reply.code(500).send({ error: 'Sign up failed' });
+  }
+});
+
+app.post('/api/auth/signin', async (req, reply) => {
+  if (!hasSameOrigin(req)) return reply.code(403).send({ error: 'Same-origin request required' });
+  const { email, password } = req.body || {};
+  if (!email || !password) return reply.code(400).send({ error: 'Email and password are required' });
+  if (typeof email !== 'string' || typeof password !== 'string') return reply.code(400).send({ error: 'Invalid input' });
+
+  const authUrl = process.env.NEON_AUTH_BASE_URL;
+  if (!authUrl) return reply.code(503).send({ error: 'Neon Auth not configured' });
+
+  try {
+      const origin = req.headers.origin || `${req.protocol}://${req.headers.host}`;
+    const response = await fetch(`${authUrl}/sign-in/email`, {
+      method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Origin': origin },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await response.json();
+    if (!response.ok) return reply.code(response.status).send({ error: data.message || 'Sign in failed' });
+
+    // Set session cookie
+    const sessionCookie = response.headers.get('set-cookie');
+    if (sessionCookie) reply.header('Set-Cookie', sessionCookie);
+
+    return { user: data.user, session: data.session };
+  } catch (err) {
+    req.log.error({ err }, 'Neon Auth signin failed');
+    return reply.code(500).send({ error: 'Sign in failed' });
+  }
+});
+
+app.post('/api/auth/signout', async (req, reply) => {
+  if (!hasSameOrigin(req)) return reply.code(403).send({ error: 'Same-origin request required' });
+
+  const authUrl = process.env.NEON_AUTH_BASE_URL;
+  if (!authUrl) return reply.code(503).send({ error: 'Neon Auth not configured' });
+
+  try {
+    const cookie = req.headers.cookie || '';
+      const origin = req.headers.origin || `${req.protocol}://${req.headers.host}`;
+    const response = await fetch(`${authUrl}/sign-out`, {
+      method: 'POST',
+        headers: { Cookie: cookie, 'Origin': origin },
+    });
+    const data = await response.json();
+    if (!response.ok) return reply.code(response.status).send({ error: data.message || 'Sign out failed' });
+
+    const sessionCookie = response.headers.get('set-cookie');
+    if (sessionCookie) reply.header('Set-Cookie', sessionCookie);
+
+    return { ok: true };
+  } catch (err) {
+    req.log.error({ err }, 'Neon Auth signout failed');
+    return reply.code(500).send({ error: 'Sign out failed' });
+  }
+});
+
+app.post('/api/auth/send-verification-email', async (req, reply) => {
+  if (!hasSameOrigin(req)) return reply.code(403).send({ error: 'Same-origin request required' });
+
+  const { email, type = 'email-verification' } = req.body || {};
+  if (!email || typeof email !== 'string') return reply.code(400).send({ error: 'Email is required' });
+
+  const authUrl = process.env.NEON_AUTH_BASE_URL;
+  if (!authUrl) return reply.code(503).send({ error: 'Neon Auth not configured' });
+
+  try {
+    const origin = req.headers.origin || `${req.protocol}://${req.headers.host}`;
+    const response = await fetch(`${authUrl}/email-otp/send-verification-otp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Origin': origin },
+      body: JSON.stringify({ email, type }),
+    });
+    const data = await response.json();
+    if (!response.ok) return reply.code(response.status).send({ error: data.message || 'Failed to send verification email' });
+    return { ok: true };
+  } catch (err) {
+    req.log.error({ err }, 'Neon Auth send verification email failed');
+    return reply.code(500).send({ error: 'Failed to send verification email' });
+  }
+});
+
+app.post('/api/auth/verify-email', async (req, reply) => {
+  if (!hasSameOrigin(req)) return reply.code(403).send({ error: 'Same-origin request required' });
+
+  const { email, code } = req.body || {};
+  if (!email || !code) return reply.code(400).send({ error: 'Email and code are required' });
+  if (typeof email !== 'string' || typeof code !== 'string') return reply.code(400).send({ error: 'Invalid input' });
+  if (!/^\d{6}$/.test(code)) return reply.code(400).send({ error: 'Invalid code format' });
+
+  const authUrl = process.env.NEON_AUTH_BASE_URL;
+  if (!authUrl) return reply.code(503).send({ error: 'Neon Auth not configured' });
+
+  try {
+    const origin = req.headers.origin || `${req.protocol}://${req.headers.host}`;
+    const response = await fetch(`${authUrl}/email-otp/verify-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Origin': origin },
+      body: JSON.stringify({ email, otp: code }),
+    });
+    const data = await response.json();
+    if (!response.ok) return reply.code(response.status).send({ error: data.message || 'Verification failed' });
+    return { ok: true };
+  } catch (err) {
+    req.log.error({ err }, 'Neon Auth verify email failed');
+    return reply.code(500).send({ error: 'Verification failed' });
+  }
+});
+
+app.get('/api/auth/session', async (req, reply) => {
+  const authUrl = process.env.NEON_AUTH_BASE_URL;
+  if (!authUrl) return reply.code(503).send({ error: 'Neon Auth not configured' });
+
+  try {
+    const cookie = req.headers.cookie || '';
+    const origin = req.headers.origin || `${req.protocol}://${req.headers.host}`;
+    const response = await fetch(`${authUrl}/get-session`, {
+      headers: { Cookie: cookie, 'Origin': origin },
+    });
+    const data = await response.json();
+    if (!response.ok) return reply.code(response.status).send({ error: data.message || 'Failed to get session' });
+    return data;
+  } catch (err) {
+    req.log.error({ err }, 'Neon Auth get session failed');
+    return reply.code(500).send({ error: 'Failed to get session' });
+  }
+});
+
+app.get('/api/auth/user', async (req, reply) => {
+  const authUrl = process.env.NEON_AUTH_BASE_URL;
+  if (!authUrl) return reply.code(503).send({ error: 'Neon Auth not configured' });
+
+  try {
+    const cookie = req.headers.cookie || '';
+    const origin = req.headers.origin || `${req.protocol}://${req.headers.host}`;
+    const response = await fetch(`${authUrl}/get-session`, {
+      headers: { Cookie: cookie, 'Origin': origin },
+    });
+    const data = await response.json();
+    if (!response.ok) return reply.code(response.status).send({ error: data.message || 'Failed to get session' });
+    return data;
+  } catch (err) {
+    req.log.error({ err }, 'Neon Auth get user failed');
+    return reply.code(500).send({ error: 'Failed to get user' });
+  }
+});
+
 app.get('/api/account/shows', async (req, reply) => {
   const account = await accountFromRequest(req, reply);
   if (!account) return reply.code(401).send({ error: 'Sign in to view your saved shows' });
@@ -429,7 +609,7 @@ app.get('/join/:id', async (req, reply) => {
   return reply.type('text/html; charset=utf-8').send(await fs.readFile(path.join(publicDir, 'audience.html')));
 });
 app.get('/assets/:file', async (req, reply) => {
-  const allowed = new Set(['home.js', 'operator.js', 'operator-connection.js', 'audience.js', 'audience-immersive.js', 'controller-workspace.js', 'show-planner.js', 'music-playlist.js', 'keyframe-editor.js', 'custom-color-picker.js', 'effect-graph.js', 'effect-node-editor.js', 'lucide.js', 'safety.js', 'styles.css', 'offset-wheel.html', 'offset-wheel.css', 'offset-wheel.js', 'google-g-logo.png']);
+  const allowed = new Set(['home.js', 'operator.js', 'operator-connection.js', 'audience.js', 'audience-immersive.js', 'controller-workspace.js', 'show-planner.js', 'music-playlist.js', 'keyframe-editor.js', 'custom-color-picker.js', 'effect-graph.js', 'effect-node-editor.js', 'lucide.js', 'safety.js', 'styles.css', 'offset-wheel.html', 'offset-wheel.css', 'offset-wheel.js', 'google-g-logo.png', 'auth-client.js', 'auth.js', 'clock-sync.js']);
   if (!allowed.has(req.params.file)) return reply.code(404).send({ error: 'Not found' });
   reply.header('Cache-Control', 'no-store');
   const mimeType = req.params.file.endsWith('.html') ? 'text/html; charset=utf-8' : req.params.file.endsWith('.css') ? 'text/css; charset=utf-8' : req.params.file.endsWith('.png') ? 'image/png' : 'text/javascript; charset=utf-8';
