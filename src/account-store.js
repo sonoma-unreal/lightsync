@@ -27,7 +27,7 @@ export function createAccountStore({ databaseUrl = process.env.DATABASE_URL } = 
       if (!pool) return;
       await pool.query(`
         CREATE TABLE IF NOT EXISTS lightsync_accounts (
-          google_sub TEXT PRIMARY KEY,
+              sub TEXT PRIMARY KEY,
           email TEXT NOT NULL,
           name TEXT NOT NULL DEFAULT '',
           first_name TEXT NOT NULL DEFAULT '',
@@ -36,14 +36,14 @@ export function createAccountStore({ databaseUrl = process.env.DATABASE_URL } = 
         );
         CREATE TABLE IF NOT EXISTS lightsync_account_sessions (
           token_hash CHAR(64) PRIMARY KEY,
-          google_sub TEXT NOT NULL REFERENCES lightsync_accounts(google_sub) ON DELETE CASCADE,
+              sub TEXT NOT NULL REFERENCES lightsync_accounts(sub) ON DELETE CASCADE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()
         );
-        CREATE INDEX IF NOT EXISTS lightsync_account_sessions_owner_idx ON lightsync_account_sessions(google_sub);
+            CREATE INDEX IF NOT EXISTS lightsync_account_sessions_owner_idx ON lightsync_account_sessions(sub);
         CREATE TABLE IF NOT EXISTS lightsync_saved_shows (
           id UUID PRIMARY KEY,
-          owner_sub TEXT NOT NULL REFERENCES lightsync_accounts(google_sub) ON DELETE CASCADE,
+              owner_sub TEXT NOT NULL REFERENCES lightsync_accounts(sub) ON DELETE CASCADE,
           name VARCHAR(48) NOT NULL,
           config JSONB NOT NULL DEFAULT '{}'::jsonb,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -55,16 +55,16 @@ export function createAccountStore({ databaseUrl = process.env.DATABASE_URL } = 
 
     async createSession(profile) {
       const account = cleanAccount(profile);
-      if (!account.sub || !account.email) throw new TypeError('Google account subject and email are required');
+          if (!account.sub || !account.email) throw new TypeError('Account subject and email are required');
       const token = crypto.randomBytes(32).toString('base64url');
       const tokenHash = hashToken(token);
       if (pool) {
         await pool.query(`
-          INSERT INTO lightsync_accounts(google_sub, email, name, first_name)
+              INSERT INTO lightsync_accounts(sub, email, name, first_name)
           VALUES($1, $2, $3, $4)
-          ON CONFLICT(google_sub) DO UPDATE SET email=EXCLUDED.email, name=EXCLUDED.name, first_name=EXCLUDED.first_name, updated_at=now()
+              ON CONFLICT(sub) DO UPDATE SET email=EXCLUDED.email, name=EXCLUDED.name, first_name=EXCLUDED.first_name, updated_at=now()
         `, [account.sub, account.email, account.name, account.firstName]);
-        await pool.query('INSERT INTO lightsync_account_sessions(token_hash, google_sub) VALUES($1, $2)', [tokenHash, account.sub]);
+            await pool.query('INSERT INTO lightsync_account_sessions(token_hash, sub) VALUES($1, $2)', [tokenHash, account.sub]);
       } else {
         accounts.set(account.sub, account);
         sessions.set(tokenHash, account.sub);
@@ -77,8 +77,8 @@ export function createAccountStore({ databaseUrl = process.env.DATABASE_URL } = 
       const tokenHash = hashToken(token);
       if (pool) {
         const { rows } = await pool.query(`
-          SELECT a.google_sub AS sub, a.email, a.name, a.first_name AS "firstName"
-          FROM lightsync_account_sessions s JOIN lightsync_accounts a USING(google_sub)
+              SELECT a.sub, a.email, a.name, a.first_name AS "firstName"
+              FROM lightsync_account_sessions s JOIN lightsync_accounts a USING(sub)
           WHERE s.token_hash=$1
         `, [tokenHash]);
         return rows[0] || null;

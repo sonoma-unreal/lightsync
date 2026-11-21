@@ -11,7 +11,6 @@ import { performance, monitorEventLoopDelay } from 'node:perf_hooks';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { OAuth2Client } from 'google-auth-library';
 import { assertProductionConfig, issueToken, verifyToken } from './auth.js';
 import { createAccountStore, SESSION_COOKIE_MAX_AGE } from './account-store.js';
 import { normalizeShowPlan, normalizeTorchSettings, TORCH_EFFECTS } from './safety.js';
@@ -23,13 +22,6 @@ const publicDir = path.join(root, 'public');
 const configuredBase = process.env.PUBLIC_BASE_URL ? new URL(process.env.PUBLIC_BASE_URL) : null;
 if (configuredBase && (!['http:', 'https:'].includes(configuredBase.protocol) || configuredBase.username || configuredBase.password || configuredBase.pathname !== '/' || configuredBase.search || configuredBase.hash)) {
   throw new Error('PUBLIC_BASE_URL must be an HTTP(S) origin without credentials or a path');
-}
-const googleClientId = String(process.env.GOOGLE_CLIENT_ID || '').trim();
-const googleClientSecret = String(process.env.GOOGLE_CLIENT_SECRET || '').trim();
-const googleAuthEnabled = Boolean(googleClientId && googleClientSecret);
-const configuredGoogleCallback = process.env.GOOGLE_CALLBACK_URL ? new URL(process.env.GOOGLE_CALLBACK_URL) : null;
-if (configuredGoogleCallback && (configuredGoogleCallback.pathname !== '/auth/google/callback' || configuredGoogleCallback.search || configuredGoogleCallback.hash || configuredGoogleCallback.username || configuredGoogleCallback.password || !['http:', 'https:'].includes(configuredGoogleCallback.protocol) || (process.env.NODE_ENV === 'production' && configuredGoogleCallback.protocol !== 'https:') || (configuredBase && configuredGoogleCallback.origin !== configuredBase.origin))) {
-  throw new Error('GOOGLE_CALLBACK_URL must be the /auth/google/callback URL on PUBLIC_BASE_URL (HTTPS in production)');
 }
 const app = Fastify({
   logger: { level: process.env.LOG_LEVEL || 'info', serializers: { req: (request) => ({ method: request.method, url: (() => { try { return new URL(request.url, 'http://localhost').pathname; } catch { return '/'; } })() }) } },
@@ -58,7 +50,6 @@ const roomLookupsPerMinute = positiveLimit('ROOM_LOOKUPS_PER_MINUTE', 300, 60000
 const operatorCommandsPerWindow = positiveLimit('OPERATOR_COMMANDS_PER_10_SECONDS', 200, 2000);
 const startLeadMs = 1200;
 const createTimestamps = new Map();
-const googleAuthTimestamps = new Map();
 const roomLookupTimestamps = new Map();
 const operatorCommandTimestamps = new Map();
 function consumeRateLimit(map, key, limit, windowMs, now = Date.now()) {
@@ -96,29 +87,28 @@ function sessionCookie(name, value, maxAge, req) {
   const secure = process.env.NODE_ENV === 'production' || siteOrigin(req).startsWith('https://');
   return `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure ? '; Secure' : ''}`;
 }
-function googleCallbackUrl(req) {
-  return configuredGoogleCallback?.toString() || `${siteOrigin(req)}/auth/google/callback`;
-}
-function googleOauthClient(req) {
-  if (!googleAuthEnabled) return null;
-  return new OAuth2Client({ clientId: googleClientId, clientSecret: googleClientSecret, redirectUri: googleCallbackUrl(req) });
-}
 async function accountFromRequest(req, reply) {
-  const token = requestCookie(req, 'lightsync_account');
-  const account = await accountStore.readSession(token);
-  if (account) return account;
-  const claims = verifyToken(token);
-  if (claims?.role === 'account' && typeof claims.sub === 'string' && typeof claims.email === 'string') {
-    const name = typeof claims.name === 'string' ? claims.name : '';
-    const profile = { sub: claims.sub, email: claims.email, name, firstName: name.split(/\s+/)[0] || '' };
-    // Keep current users signed in across the account-session format change.
-    if (process.env.NODE_ENV === 'test') return profile;
-    const replacement = await accountStore.createSession(profile);
-    req.lightsyncAccountToken = replacement;
-    reply?.header('Set-Cookie', sessionCookie('lightsync_account', replacement, SESSION_COOKIE_MAX_AGE, req));
-    return profile;
+  const authUrl = process.env.NEON_AUTH_BASE_URL;
+  if (!authUrl) return null;
+
+  try {
+    const cookie = req.headers.cookie || '';
+    const origin = req.headers.origin || `${req.protocol}://${req.headers.host}`;
+    const response = await fetch(`${authUrl}/get-session`, {
+      headers: { Cookie: cookie, 'Origin': origin },
+    });
+    const text = await response.text();
+    const data = text ? JSON.parse(text) : null;
+    if (!response.ok || !data?.user) return null;
+    return {
+      sub: data.user.id,
+      email: data.user.email,
+      name: data.user.name || '',
+      firstName: data.user.name?.split(/\s+/)[0] || '',
+    };
+  } catch {
+    return null;
   }
-  return null;
 }
 function equalText(left, right) {
   if (typeof left !== 'string' || typeof right !== 'string') return false;
@@ -315,57 +305,21 @@ app.get('/', async (_req, reply) => { reply.header('Cache-Control', 'no-store');
 app.get('/host', async (_req, reply) => { reply.header('Cache-Control', 'no-store'); return reply.type('text/html; charset=utf-8').send(await fs.readFile(path.join(publicDir, 'operator.html'))); });
 app.get('/login', async (_req, reply) => { reply.header('Cache-Control', 'no-store'); return reply.type('text/html; charset=utf-8').send(await fs.readFile(path.join(publicDir, 'login.html'))); });
 app.get('/api/auth/me', async (req, reply) => {
-  const user = googleAuthEnabled ? await accountFromRequest(req, reply) : null;
-  if (user && !req.lightsyncAccountToken) reply.header('Set-Cookie', sessionCookie('lightsync_account', requestCookie(req, 'lightsync_account'), SESSION_COOKIE_MAX_AGE, req));
-  return { enabled: googleAuthEnabled, user };
-});
-app.get('/auth/google', async (req, reply) => {
-  if (!googleAuthEnabled) return reply.code(503).type('text/plain; charset=utf-8').send('Google sign-in is not configured');
-  const rate = consumeRateLimit(googleAuthTimestamps, req.ip, 10, 10 * 60_000);
-  if (!rate.allowed) { reply.header('Retry-After', String(rate.retryAfter)); return reply.code(429).type('text/plain; charset=utf-8').send('Too many sign-in attempts; try again shortly.'); }
-  const client = googleOauthClient(req);
-  const { codeVerifier, codeChallenge } = await client.generateCodeVerifierAsync();
-  const state = crypto.randomBytes(32).toString('base64url');
-  const nonce = crypto.randomBytes(32).toString('base64url');
-  const stateToken = issueToken({ role: 'google_oauth', state, nonce, codeVerifier }, 10 * 60_000);
-  const authorizationUrl = client.generateAuthUrl({
-    response_type: 'code',
-    scope: ['openid', 'email', 'profile'],
-    state,
-    nonce,
-    code_challenge: codeChallenge,
-    code_challenge_method: 'S256',
-    prompt: 'select_account',
-  });
-  reply.header('Set-Cookie', sessionCookie('lightsync_oauth_state', stateToken, 600, req));
-  return reply.redirect(authorizationUrl);
-});
-app.get('/auth/google/callback', async (req, reply) => {
-  const clearState = sessionCookie('lightsync_oauth_state', '', 0, req);
-  const fail = () => reply.header('Set-Cookie', clearState).redirect('/host?auth=error');
-  const query = req.query && typeof req.query === 'object' ? req.query : {};
-  if (!googleAuthEnabled || typeof query.code !== 'string' || typeof query.state !== 'string') return fail();
-  const stateClaims = verifyToken(requestCookie(req, 'lightsync_oauth_state'));
-  if (!stateClaims || stateClaims.role !== 'google_oauth' || !equalText(stateClaims.state, query.state) || typeof stateClaims.nonce !== 'string' || typeof stateClaims.codeVerifier !== 'string') return fail();
+  const authUrl = process.env.NEON_AUTH_BASE_URL;
+  if (!authUrl) return { enabled: false, user: null };
+
   try {
-    const client = googleOauthClient(req);
-    const { tokens } = await client.getToken({ code: query.code, codeVerifier: stateClaims.codeVerifier });
-    if (!tokens.id_token) return fail();
-    const ticket = await client.verifyIdToken({ idToken: tokens.id_token, audience: googleClientId });
-    const profile = ticket.getPayload();
-    const issuerValid = profile?.iss === 'https://accounts.google.com' || profile?.iss === 'accounts.google.com';
-    if (!profile || !issuerValid || !equalText(profile.nonce, stateClaims.nonce) || typeof profile.sub !== 'string' || !profile.sub || typeof profile.email !== 'string' || profile.email_verified !== true) return fail();
-    const accountToken = await accountStore.createSession({
-      sub: profile.sub,
-      email: profile.email,
-      name: profile.name,
-      firstName: profile.given_name,
+    const cookie = req.headers.cookie || '';
+    const origin = req.headers.origin || `${req.protocol}://${req.headers.host}`;
+    const response = await fetch(`${authUrl}/get-session`, {
+      headers: { Cookie: cookie, 'Origin': origin },
     });
-    reply.header('Set-Cookie', [clearState, sessionCookie('lightsync_account', accountToken, SESSION_COOKIE_MAX_AGE, req)]);
-    return reply.redirect('/host');
+    const text = await response.text();
+    const data = text ? JSON.parse(text) : null;
+    if (!response.ok) return { enabled: true, user: null };
+    return { enabled: true, user: data?.user || null };
   } catch {
-    req.log.warn('Google sign-in callback failed');
-    return fail();
+    return { enabled: true, user: null };
   }
 });
 app.post('/auth/logout', async (req, reply) => {
@@ -517,11 +471,14 @@ app.get('/api/auth/session', async (req, reply) => {
   try {
     const cookie = req.headers.cookie || '';
     const origin = req.headers.origin || `${req.protocol}://${req.headers.host}`;
+    req.log.info({ cookie: cookie.substring(0, 50) }, 'Forwarding cookie to Neon Auth');
     const response = await fetch(`${authUrl}/get-session`, {
       headers: { Cookie: cookie, 'Origin': origin },
     });
-    const data = await response.json();
-    if (!response.ok) return reply.code(response.status).send({ error: data.message || 'Failed to get session' });
+    const text = await response.text();
+    req.log.info({ status: response.status, body: text.substring(0, 200) }, 'Neon Auth get-session response');
+    const data = text ? JSON.parse(text) : null;
+    if (!response.ok) return reply.code(response.status).send({ error: data?.message || 'Failed to get session' });
     return data;
   } catch (err) {
     req.log.error({ err }, 'Neon Auth get session failed');
@@ -536,11 +493,14 @@ app.get('/api/auth/user', async (req, reply) => {
   try {
     const cookie = req.headers.cookie || '';
     const origin = req.headers.origin || `${req.protocol}://${req.headers.host}`;
+    req.log.info({ cookie: cookie.substring(0, 50) }, 'Forwarding cookie to Neon Auth');
     const response = await fetch(`${authUrl}/get-session`, {
       headers: { Cookie: cookie, 'Origin': origin },
     });
-    const data = await response.json();
-    if (!response.ok) return reply.code(response.status).send({ error: data.message || 'Failed to get session' });
+    const text = await response.text();
+    req.log.info({ status: response.status, body: text.substring(0, 200) }, 'Neon Auth get-session response');
+    const data = text ? JSON.parse(text) : null;
+    if (!response.ok) return reply.code(response.status).send({ error: data?.message || 'Failed to get session' });
     return data;
   } catch (err) {
     req.log.error({ err }, 'Neon Auth get user failed');
@@ -609,7 +569,7 @@ app.get('/join/:id', async (req, reply) => {
   return reply.type('text/html; charset=utf-8').send(await fs.readFile(path.join(publicDir, 'audience.html')));
 });
 app.get('/assets/:file', async (req, reply) => {
-  const allowed = new Set(['home.js', 'operator.js', 'operator-connection.js', 'audience.js', 'audience-immersive.js', 'controller-workspace.js', 'show-planner.js', 'music-playlist.js', 'keyframe-editor.js', 'custom-color-picker.js', 'effect-graph.js', 'effect-node-editor.js', 'lucide.js', 'safety.js', 'styles.css', 'offset-wheel.html', 'offset-wheel.css', 'offset-wheel.js', 'google-g-logo.png', 'auth-client.js', 'auth.js', 'clock-sync.js']);
+  const allowed = new Set(['home.js', 'operator.js', 'operator-connection.js', 'audience.js', 'audience-immersive.js', 'controller-workspace.js', 'show-planner.js', 'music-playlist.js', 'keyframe-editor.js', 'custom-color-picker.js', 'effect-graph.js', 'effect-node-editor.js', 'lucide.js', 'safety.js', 'styles.css', 'offset-wheel.html', 'offset-wheel.css', 'offset-wheel.js', 'auth-client.js', 'auth.js', 'clock-sync.js']);
   if (!allowed.has(req.params.file)) return reply.code(404).send({ error: 'Not found' });
   reply.header('Cache-Control', 'no-store');
   const mimeType = req.params.file.endsWith('.html') ? 'text/html; charset=utf-8' : req.params.file.endsWith('.css') ? 'text/css; charset=utf-8' : req.params.file.endsWith('.png') ? 'image/png' : 'text/javascript; charset=utf-8';
@@ -618,7 +578,7 @@ app.get('/assets/:file', async (req, reply) => {
 
 app.post('/api/rooms', async (req, reply) => {
   const account = await accountFromRequest(req, reply);
-  if (!account) return reply.code(401).send({ error: 'Sign in with Google before creating a show' });
+  if (!account) return reply.code(401).send({ error: 'Sign in before creating a show' });
   if (!hasSameOrigin(req)) return reply.code(403).send({ error: 'Same-origin request required' });
   const rate = consumeRateLimit(createTimestamps, req.ip, 6, 60_000);
   if (!rate.allowed) { reply.header('Retry-After', String(rate.retryAfter)); return reply.code(429).send({ error: 'Room creation limit reached; try again in a minute' }); }
